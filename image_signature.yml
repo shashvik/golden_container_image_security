@@ -1,0 +1,58 @@
+name: Dockerfile Image Signing Check
+
+on:
+  push:
+    branches:
+      - '*'
+
+env:
+  DOCKER_USER: ${{ secrets.DOCKER_USER }}
+  DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+  COSIGN_PUBLIC_KEY_NEW: ${{ secrets.COSIGN_PUBLIC_KEY_NEW }}
+  COSIGN_PRIVATE_KEY_NEW: ${{ secrets.COSIGN_PRIVATE_KEY_NEW }}
+  COSIGN_PASSWORD: ${{ secrets.COSIGN_PRIVATE_PHRASE }}
+
+jobs:
+  check-and-sign-images:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v2
+
+      - name: Decode Cosign keys
+        run: |
+          echo "${COSIGN_PUBLIC_KEY_NEW}" | base64 --decode > pub_key
+          echo "${COSIGN_PRIVATE_KEY_NEW}" | base64 --decode > prv_key
+
+      - name: Docker login
+        run: docker login -u "$DOCKER_USER" -p "$DOCKER_PASSWORD"
+
+      - uses: sigstore/cosign-installer@main
+
+      - name: Parse Dockerfile and Verify Base Image Signatures
+        id: verify-base-images
+        run: |
+          set -e
+          image_names=($(grep -i '^FROM' Dockerfile | awk '{print $2}' | sort -u))
+          as_values=($(grep -i 'FROM.*AS' Dockerfile | awk '{print $4}' | sort -u))
+          disjoint_subset=()
+
+          for image in "${image_names[@]}"; do
+            if [[ ! " ${as_values[@]} " =~ " $image " ]]; then
+              disjoint_subset+=("$image")
+            fi
+          done
+
+          echo "🔍 Verifying base image signatures..."
+          for base in "${disjoint_subset[@]}"; do
+            echo "🔐 Verifying: $base"
+            cosign verify --key pub_key "$base"
+          done
+
+      - name: Build final microservice image
+        run: |
+          docker build -t myorg/myservice:latest .
+
+      - name: Sign final microservice image
+        run: |
+          cosign sign --key prv_key myorg/myservice:latest -y
